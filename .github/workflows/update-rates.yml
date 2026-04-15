@@ -1,0 +1,57 @@
+name: Update HTS Base Duty Rates
+
+on:
+  schedule:
+    - cron: '0 6 * * 0'
+  workflow_dispatch:
+    inputs:
+      sec122_rate:
+        description: 'Section 122 rate (%) — leave blank to keep current'
+        required: false
+        default: ''
+      sec301_rate:
+        description: 'Section 301 rate (%) — leave blank to keep current'
+        required: false
+        default: ''
+
+jobs:
+  update-rates:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r scripts/requirements.txt
+
+      - name: Run rate update script
+        env:
+          SEC122_RATE: ${{ github.event.inputs.sec122_rate }}
+          SEC301_RATE: ${{ github.event.inputs.sec301_rate }}
+        run: python scripts/update_rates.py
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          git diff --quiet index.html data/base_rates.b64 && echo "changed=false" >> $GITHUB_OUTPUT || echo "changed=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and push updated files
+        if: steps.check_changes.outputs.changed == 'true'
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add index.html data/base_rates.b64
+          git commit -m "Auto-update: HTS base duty rates $(date +'%Y-%m-%d')"
+          git push
+
+      - name: No changes detected
+        if: steps.check_changes.outputs.changed == 'false'
+        run: echo "Rates are already up to date."
