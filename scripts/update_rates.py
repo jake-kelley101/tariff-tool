@@ -98,6 +98,11 @@ def build_rate_lookup(hts_data):
             if not htsno or not general:
                 continue
             key = re.sub(r'\D', '', htsno)
+            # Normalize to 8-digit keys for consistent lookup
+            # 10-digit codes → truncate to 8 (removes statistical suffix)
+            # 4/6-digit chapter/heading codes → keep as-is for fallback
+            if len(key) == 10:
+                key = key[:8]
             rate = parse_av(general)
             if rate is not None and key not in lookup:
                 lookup[key] = {
