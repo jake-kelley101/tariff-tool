@@ -634,6 +634,32 @@ function getMat(pn) {
   // 'O' = confirmed Other (non-metal)
   return {raw:entry[0]||'', cat:entry[1]||''};
 }
+
+// Infer material category from HTS chapter when no other data is available
+// Ch 74=Copper, 76=Aluminum, 75/78/79/80/81=Other (non-steel base metals)
+const HTS_CHAPTER_MAT = {
+  '74':'C', '75':'O', '76':'A', '78':'O', '79':'O', '80':'O', '81':'O'
+};
+const HTS_CHAPTER_LABEL = {
+  '74':'Copper (Ch. 74)', '75':'Other — Nickel (Ch. 75)',
+  '76':'Aluminum (Ch. 76)', '78':'Other — Lead (Ch. 78)',
+  '79':'Other — Zinc (Ch. 79)', '80':'Other — Tin (Ch. 80)',
+  '81':'Other — Base Metals (Ch. 81)'
+};
+function getMatFromHts(hts) {
+  if(!hts) return {raw:'',cat:''};
+  const ch = hts.replace(/\D/g,'').slice(0,2);
+  const cat = HTS_CHAPTER_MAT[ch]||'';
+  return cat ? {raw: HTS_CHAPTER_LABEL[ch]||'', cat} : {raw:'',cat:''};
+}
+
+// Resolve effective material: override > DB lookup > HTS chapter inference
+function resolvemat(pn, hts, override) {
+  if(override) return override;
+  const fromDB = getMat(pn);
+  if(fromDB.cat) return fromDB.cat;
+  return getMatFromHts(hts).cat;
+}
 const CAT_LABELS = {S:'Steel',A:'Aluminum',C:'Copper',O:'Other','':''};
 const CAT_COLORS = {S:'var(--text-dim)',A:'#7eb8e8',C:'#c87941',O:'var(--text-muted)','':'var(--text-muted)'};
 
@@ -987,10 +1013,12 @@ function renderRow(row){
 
   // Material cell
   const matInfo = getMat(row.pn);
-  const matCat = row._matOverride || matInfo.cat;
+  const htsInferred = getMatFromHts(row.hts);
+  const matCat = row._matOverride || matInfo.cat || htsInferred.cat;
+  const matRawDisplay = matInfo.raw || (htsInferred.cat ? htsInferred.raw : '');
   const matLabel = CAT_LABELS[matCat]||'Other';
   const matColor = CAT_COLORS[matCat];
-  const matRaw = matInfo.raw ? `<div style="font-size:9px;color:var(--text-muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100px" title="${e(matInfo.raw)}">${e(matInfo.raw.slice(0,20))}${matInfo.raw.length>20?'…':''}</div>` : '';
+  const matRaw = matRawDisplay ? `<div style="font-size:9px;color:var(--text-muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100px" title="${e(matRawDisplay)}">${e(matRawDisplay.slice(0,22))}${matRawDisplay.length>22?'…':''}</div>` : '';
   const matCell = `<div style="display:flex;flex-direction:column;gap:2px">
     <select style="background:var(--bg);border:1px solid var(--border);color:${matColor};font-family:var(--mono);font-size:11px;padding:2px 4px;border-radius:2px;width:100%" onchange="setMatOverride(${row.id},this.value)">
       <option value=""${!matCat||matCat===''?' selected':''} style="color:var(--text-muted)">— unknown —</option>
@@ -1006,17 +1034,11 @@ function renderRow(row){
   const scope232Entry = get232(row.hts||'');
   let scope232Cell;
   if(!scope232Entry) {
-    // HTS not in §232 scope at all — check if material is a metal (steel/al/cu)
-    // If so, show a note that this material is not covered for this code
-    const effectiveMat3 = row._matOverride||getMat(row.pn).cat;
-    const isMetal = ['S','A','C'].includes(effectiveMat3);
-    const noScopeTag = isMetal
-      ? `<div style="font-size:9px;color:var(--yellow);margin-top:2px">⚠ exempt — §122 applies</div>`
-      : `<span style="font-size:11px;color:var(--text-muted)">—</span>`;
-    scope232Cell = noScopeTag;
+    // HTS not in §232 scope — no flag needed, §122 is the normal default for everyone
+    scope232Cell = `<span style="font-size:11px;color:var(--text-muted)">—</span>`;
   } else {
     const scopeMats = (scope232Entry.a||[]);
-    const effectiveMat2 = row._matOverride||getMat(row.pn).cat;
+    const effectiveMat2 = resolvemat(row.pn, row.hts, row._matOverride);
     const partMatName = MAT_CAT_TO_232[effectiveMat2];
     // Exempt if: confirmed Other, OR known metal that is NOT in the scope materials list
     const isExempt = scopeMats.length > 0 && (
@@ -1098,7 +1120,11 @@ function setManual(id){const r=rows.find(r=>r.id===id);if(!r)return;r.htsType='m
 function onBL(id){const r=rows.find(r=>r.id===id);if(!r)return;if(!r.hts||r.hts.trim().length<4)lookupRow(id);}
 function setMatOverride(id,val){
   const r=rows.find(r=>r.id===id);
-  if(r){r._matOverride=val;}
+  if(r){
+    r._matOverride=val;
+    renderRow(r);  // re-render so §232 scope cell and flags update
+    calcRow(id);   // recalculate so tariff flags update too
+  }
 }
 function manualBase(id,val){const r=rows.find(r=>r.id===id);if(r){r._manualBase=parseFloat(val)||0;calcRow(id);}}
 function delRow(id){rows=rows.filter(r=>r.id!==id);document.getElementById('row-'+id)?.remove();updateEmpty();updateTotals();}
@@ -1321,7 +1347,7 @@ function calcRow(id){
   const isDomestic=['usa','us','united states','u.s.','u.s.a.'].includes((row.country||'').trim().toLowerCase());
   const bd=isDomestic?{pct:0,unknown:false,compound:false}:getBaseDuty(row.hts);
   const basePct=isDomestic?0:(row._manualBase!==null?row._manualBase:bd.pct);
-  const effectiveMat=row._matOverride||getMat(row.pn).cat;
+  const effectiveMat=resolvemat(row.pn, row.hts, row._matOverride);
   const addl=getAddl(row.country,row.hts,effectiveMat);
   const totPct=basePct+addl.rate;
   const baseAmt=cost*basePct/100;
@@ -1337,7 +1363,7 @@ function calcRow(id){
   if(_rawFlags.includes('301')) flagItems.push({t:'w',txt:'Sec. 301'});
   if(_rawFlags.includes('232')) flagItems.push({t:'i',txt:'Sec. 232'});
   // Flag unknown material if HTS is in §232 scope (worst-case rate being applied)
-  const effectiveMatForFlag = row._matOverride || getMat(row.pn).cat;
+  const effectiveMatForFlag = resolvemat(row.pn, row.hts, row._matOverride);
   if(!effectiveMatForFlag && get232(row.hts||'')) {
     flagItems.push({t:'w',txt:'Missing Material — Assuming Highest Rate'});
   }
