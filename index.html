@@ -360,6 +360,91 @@
     </div>
   </div>
 
+  <!-- DATA SOURCES & LOGIC -->
+  <div class="section">
+    <div class="sh">
+      <button class="instr-toggle" id="dataToggle" onclick="toggleData()">
+        <span class="caret">▶</span>
+        <span class="st">🔢 Data Sources &amp; Calculation Logic</span>
+      </button>
+    </div>
+    <div class="sb" id="dataBody" style="display:none">
+      <div class="instr-steps">
+
+        <div class="instr-step">
+          <div class="instr-step-num"></div>
+          <div class="instr-step-content">
+            <div class="instr-step-title">Base HTS Duty Rates</div>
+            <div class="instr-step-body">
+              Base duty rates — the standard Column 1 import tariff that applies to every HTS code regardless of any executive action — are sourced from the <strong>USITC Harmonized Tariff Schedule</strong> (hts.usitc.gov). The tool embeds a compressed snapshot of these rates at build time so it works entirely offline on restricted networks. A <strong>GitHub Actions workflow runs every Sunday</strong> and automatically downloads the latest USITC data, rebuilds the rate table, and publishes an updated version of the tool — no manual intervention required.
+              <span class="note">Base duties range from 0% (Free) on many industrial goods to 8–10%+ on some finished products. They are separate from and do not stack with §232 or §122 additional tariffs.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="instr-step">
+          <div class="instr-step-num"></div>
+          <div class="instr-step-content">
+            <div class="instr-step-title">HTS Code Lookup</div>
+            <div class="instr-step-body">
+              When no HTS code is provided, the tool searches an embedded reference database of <strong>~112,000 Siemens Energy STG parts</strong> by part number and description. Lookup results are color-coded by confidence:
+              <br><br>
+              <span class="instr-tag exact">● Exact</span> &nbsp;The part number matched directly in the database. The HTS code is taken as-is.
+              <br><br>
+              <span class="instr-tag fuzzy">● Fuzzy</span> &nbsp;No exact part number match was found. The tool instead searches by <strong>description similarity</strong> using a text-matching algorithm and suggests the closest result. Because this is an approximation, you must manually confirm or reject the suggestion before the calculation is finalized. Fuzzy matches should always be verified against SAP or the CRT tool.
+              <span class="note">The reference database is prioritized by plant: plant 4200 and 4700 entries are preferred over other plants. The new parts reference list (with 10-digit codes) takes precedence over the broader SAP export.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="instr-step">
+          <div class="instr-step-num"></div>
+          <div class="instr-step-content">
+            <div class="instr-step-title">Country of Origin Auto-Fill</div>
+            <div class="instr-step-body">
+              If you leave the Country of Origin field blank, the tool will attempt to auto-fill it from the <strong>most recent purchase order</strong> recorded in the parts reference list. This reflects where the part was last sourced from, which may not always be its current origin — always verify if the sourcing country may have changed.
+              <span class="note">Auto-filled countries are shown in the same field as manually entered ones and can be overridden at any time. If no historical origin is on record, the field stays blank and no additional tariff can be calculated for that row.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="instr-step">
+          <div class="instr-step-num"></div>
+          <div class="instr-step-content">
+            <div class="instr-step-title">Additional Tariff Calculation</div>
+            <div class="instr-step-body">
+              Once country of origin and HTS code are known, the tool calculates the applicable additional tariff in this order:
+              <br><br>
+              <strong>1. Domestic (US origin)</strong> — No base duty, no additional tariff.
+              <br><br>
+              <strong>2. §232 (Steel / Aluminum / Copper)</strong> — Checked first for all non-US imports. If the HTS code appears in the §232 scope annex <em>and</em> the part's base material matches the covered material(s), the §232 rate applies (50% for primary metals, 25% for most derivatives, 15% temporarily for certain machinery through Dec 31, 2027). §232 and §122 do not stack.
+              <br><br>
+              <strong>3. §122 (10% baseline)</strong> — Applies to all non-US imports not covered by §232. This is a temporary balance-of-payments surcharge effective February 24, 2026, scheduled to expire after 150 days unless extended by Congress.
+              <br><br>
+              <strong>4. §301 (China +25%)</strong> — Stacks on top of either §232 or §122 for goods of Chinese origin.
+              <span class="note">USMCA-qualifying goods from Canada and Mexico are exempt from §122 but the tool conservatively assumes non-qualifying status. Verify USMCA eligibility separately if applicable.</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="instr-step">
+          <div class="instr-step-num"></div>
+          <div class="instr-step-content">
+            <div class="instr-step-title">Material Classification &amp; Worst-Case Logic</div>
+            <div class="instr-step-body">
+              Base material (Steel, Aluminum, Copper, or Other) is looked up from an embedded material reference table built from SAP material master data and internal CM-code classifications. The material determines whether §232 applies and which rate is used.
+              <br><br>
+              When material is <strong>unknown</strong> (shown as "— unknown —"), the tool applies <strong>worst-case logic</strong>: if the HTS code is in the §232 scope, the tool assumes the material matches and applies the §232 rate rather than the lower §122 rate. This produces a conservative (higher) duty estimate.
+              <br><br>
+              When material is confirmed <strong>Other (non-metal)</strong>, the part is exempt from §232 regardless of HTS code, and §122 applies instead. The <strong>§232 Scope</strong> column will display <em>⚠ exempt — §122 applies</em> in these cases, as well as for metal parts whose specific material does not match the covered material(s) for that HTS code.
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+
   <!-- INPUT -->
   <div class="section">
     <div class="sh">
@@ -921,15 +1006,24 @@ function renderRow(row){
   const scope232Entry = get232(row.hts||'');
   let scope232Cell;
   if(!scope232Entry) {
-    scope232Cell = `<span style="font-size:11px;color:var(--text-muted)">—</span>`;
+    // HTS not in §232 scope at all — check if material is a metal (steel/al/cu)
+    // If so, show a note that this material is not covered for this code
+    const effectiveMat3 = row._matOverride||getMat(row.pn).cat;
+    const isMetal = ['S','A','C'].includes(effectiveMat3);
+    const noScopeTag = isMetal
+      ? `<div style="font-size:9px;color:var(--yellow);margin-top:2px">⚠ exempt — §122 applies</div>`
+      : `<span style="font-size:11px;color:var(--text-muted)">—</span>`;
+    scope232Cell = noScopeTag;
   } else {
     const scopeMats = (scope232Entry.a||[]);
     const effectiveMat2 = row._matOverride||getMat(row.pn).cat;
     const partMatName = MAT_CAT_TO_232[effectiveMat2];
-    // Blank material = unknown → worst-case (not exempt). Confirmed 'Other' = exempt.
-    const isExempt = scopeMats.length > 0 && effectiveMat2 === 'O';
+    // Exempt if: confirmed Other, OR known metal that is NOT in the scope materials list
+    const isExempt = scopeMats.length > 0 && (
+      effectiveMat2 === 'O' ||
+      (partMatName && !scopeMats.includes(partMatName))
+    );
     const matTags = scopeMats.map(mat => {
-      const isMatch = partMatName === mat;
       const col = mat==='Steel'?'var(--text-dim)':mat==='Aluminum'?'#7eb8e8':'#c87941';
       return `<span style="font-size:10px;font-family:var(--mono);padding:1px 5px;border-radius:2px;background:var(--surface);border:1px solid ${col};color:${col};margin-right:2px">${mat}</span>`;
     }).join('');
@@ -1335,6 +1429,13 @@ function showToast(msg,type='s'){const t=document.getElementById('toast');t.text
 
 
 // ── INIT ──────────────────────────────────────────────────
+function toggleData(){
+  const btn=document.getElementById('dataToggle');
+  const body=document.getElementById('dataBody');
+  const open=body.style.display==='block';
+  body.style.display=open?'none':'block';
+  btn.classList.toggle('open',!open);
+}
 function toggleInstr(){
   const btn=document.getElementById('instrToggle');
   const body=document.getElementById('instrBody');
